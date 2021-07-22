@@ -883,9 +883,7 @@ class DockerSpawner(Spawner):
         else:
             image_info = await self.docker("inspect_image", self.image)
             cmd = image_info["Config"]["Cmd"]
-            args = self.get_args()
-        return cmd #+ ['--auth=none']
-        #+ self.get_args()
+        return cmd 
 
     async def remove_object(self):
         self.log.info("Removing %s %s", self.object_type, self.object_id)
