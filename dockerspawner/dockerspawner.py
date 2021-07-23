@@ -1152,8 +1152,6 @@ cert: false
 
         ip, port = await self.get_ip_and_port()
 
-        self.handler.set_server_cookie(self.user, ip)
-
         if jupyterhub.version_info < (0, 7):
             # store on user for pre-jupyterhub-0.7:
             self.user.server.ip = ip
