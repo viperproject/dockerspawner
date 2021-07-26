@@ -1104,11 +1104,7 @@ class DockerSpawner(Spawner):
         docker_client = docker.from_env()
         container = docker_client.containers.get(self.container_id)
         with open('/srv/jupyterhub/configs/config_{}.yaml'.format(self.user.escaped_name), 'w') as f:
-            f.write("""bind-addr: 127.0.0.1:8080
-auth: password
-password: {}
-cert: false
-""".format(self.user.server_passwd))
+            f.write(f"bind-addr: 127.0.0.1:8080\nauth: password\npassword: {self.user.server_passwd}\ncert: false\n")
 
         with tarfile.open('/srv/jupyterhub/configs/config_{}.tar'.format(self.user.escaped_name), mode='w') as tar:
             tar.add('/srv/jupyterhub/configs/config_{}.yaml'.format(self.user.escaped_name), arcname='config.yaml')
