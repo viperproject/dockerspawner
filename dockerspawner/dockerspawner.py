@@ -5,6 +5,7 @@ import asyncio
 import os
 import string
 import warnings
+import tarfile
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from io import BytesIO
@@ -57,36 +58,6 @@ class DockerSpawner(Spawner):
 
     _executor = None
 
-    _deprecated_aliases = {
-        "container_ip": ("host_ip", "0.9.*"),
-        "container_port": ("port", "0.9.*"),
-        "container_image": ("image", "0.9.*"),
-        "container_prefix": ("prefix", "0.10.0"),
-        "container_name_template": ("name_template", "0.10.0*"),
-        "remove_containers": ("remove", "0.10.0"),
-        "image_whitelist": ("allowed_images", "12.0"),
-    }
-
-    @observe(*list(_deprecated_aliases))
-    def _deprecated_trait(self, change):
-        """observer for deprecated traits"""
-        old_attr = change.name
-        new_attr, version = self._deprecated_aliases.get(old_attr)
-        new_value = getattr(self, new_attr)
-        if new_value != change.new:
-            # only warn if different
-            # protects backward-compatible config from warnings
-            # if they set the same value under both names
-            self.log.warning(
-                "{cls}.{old} is deprecated in DockerSpawner {version}, use {cls}.{new} instead".format(
-                    cls=self.__class__.__name__,
-                    old=old_attr,
-                    new=new_attr,
-                    version=version,
-                )
-            )
-            setattr(self, new_attr, change.new)
-
     @property
     def executor(self):
         """single global executor"""
@@ -132,14 +103,6 @@ class DockerSpawner(Spawner):
         """alias for object_name"""
         return self.object_name
 
-    # deprecate misleading container_ip, since
-    # it is not the ip in the container,
-    # but the host ip of the port forwarded to the container
-    # when use_internal_ip is False
-    container_ip = Unicode(
-        "127.0.0.1", help="Deprecated, use `DockerSpawner.host_ip`", config=True
-    )
-
     host_ip = Unicode(
         "127.0.0.1",
         help="""The ip address on the host on which to expose the container's port
@@ -162,21 +125,12 @@ class DockerSpawner(Spawner):
                 return urlinfo.hostname
         return '127.0.0.1'
 
-    # unlike container_ip, container_port is the internal port
-    # on which the server is bound.
-    container_port = Int(
-        8888,
-        min=1,
-        max=65535,
-        help="Deprecated, use `DockerSpawner.port.`",
-        config=True,
-    )
 
-    # fix default port to 8888, used in the container
+    # fix default port to 8080, used in the container
 
     @default("port")
     def _port_default(self):
-        return 8888
+        return 8080
 
     # default to listening on all-interfaces in the container
 
@@ -184,11 +138,6 @@ class DockerSpawner(Spawner):
     def _ip_default(self):
         return "0.0.0.0"
 
-    container_image = Unicode(
-        "jupyterhub/singleuser:%s" % _jupyterhub_xy,
-        help="Deprecated, use `DockerSpawner.image.`",
-        config=True,
-    )
 
     image = Unicode(
         "jupyterhub/singleuser:%s" % _jupyterhub_xy,
@@ -205,12 +154,6 @@ class DockerSpawner(Spawner):
         Any of the jupyter docker-stacks should work without additional config,
         as long as the version of jupyterhub in the image is compatible.
         """,
-    )
-
-    image_whitelist = Union(
-        [Any(), Dict(), List()],
-        help="Deprecated, use `DockerSpawner.allowed_images`.",
-        config=True,
     )
 
     allowed_images = Union(
@@ -318,13 +261,6 @@ class DockerSpawner(Spawner):
         """,
     )
 
-    container_prefix = Unicode(
-        config=True, help="Deprecated, use `DockerSpawner.prefix`."
-    )
-
-    container_name_template = Unicode(
-        config=True, help="Deprecated, use `DockerSpawner.name_template`."
-    )
 
     prefix = Unicode(
         "jupyter",
@@ -514,18 +450,6 @@ class DockerSpawner(Spawner):
     def _get_default_format_volume_name(self):
         return default_format_volume_name
 
-    use_docker_client_env = Bool(
-        True,
-        config=True,
-        help="Deprecated. Docker env variables are always used if present.",
-    )
-
-    @observe("use_docker_client_env")
-    def _client_env_changed(self):
-        self.log.warning(
-            "DockerSpawner.use_docker_client_env is deprecated and ignored."
-            "  Docker environment variables are always used if defined."
-        )
 
     tls_config = Dict(
         config=True,
@@ -533,10 +457,6 @@ class DockerSpawner(Spawner):
 
         See docker.client.TLSConfig constructor for options.
         """,
-    )
-    tls = tls_verify = tls_ca = tls_cert = tls_key = tls_assert_hostname = Any(
-        config=True,
-        help="""Deprecated, use `DockerSpawner.tls_config` dict to set any TLS options.""",
     )
 
     @observe(
@@ -549,9 +469,6 @@ class DockerSpawner(Spawner):
             self.__class__.__name__,
         )
 
-    remove_containers = Bool(
-        False, config=True, help="Deprecated, use `DockerSpawner.remove`."
-    )
 
     remove = Bool(
         False,
@@ -925,6 +842,7 @@ class DockerSpawner(Spawner):
     def get_env(self):
         env = super().get_env()
         env['JUPYTER_IMAGE_SPEC'] = self.image
+        env['JUPYTER_SOCKET_NAMESPACE'] = '/socket' + self.proxy_spec
         return env
 
     def _docker(self, method, *args, **kwargs):
@@ -1000,7 +918,7 @@ class DockerSpawner(Spawner):
         else:
             image_info = await self.docker("inspect_image", self.image)
             cmd = image_info["Config"]["Cmd"]
-        return cmd + self.get_args()
+        return cmd 
 
     async def remove_object(self):
         self.log.info("Removing %s %s", self.object_type, self.object_id)
@@ -1217,6 +1135,36 @@ class DockerSpawner(Spawner):
                     self.api_token = line.split("=", 1)[1]
                     break
 
+        #add code-server config with custom password located in self.user.server_passwd
+        docker_client = docker.from_env()
+        container = docker_client.containers.get(self.container_id)
+        with open('/srv/jupyterhub/configs/config_{}.yaml'.format(self.user.escaped_name), 'w') as f:
+            f.write(f"bind-addr: 127.0.0.1:8080\nauth: password\npassword: {self.user.server_passwd}\ncert: false\n")
+
+        with tarfile.open('/srv/jupyterhub/configs/config_{}.tar'.format(self.user.escaped_name), mode='w') as tar:
+            tar.add('/srv/jupyterhub/configs/config_{}.yaml'.format(self.user.escaped_name), arcname='config.yaml')
+        data = open('/srv/jupyterhub/configs/config_{}.tar'.format(self.user.escaped_name), 'rb').read()
+        container.put_archive('/home/coder/.config/code-server', data)    
+
+        #remove temporary config files
+        os.remove('/srv/jupyterhub/configs/config_{}.tar'.format(self.user.escaped_name))
+        os.remove('/srv/jupyterhub/configs/config_{}.yaml'.format(self.user.escaped_name))
+
+        with open('/srv/jupyterhub/src_files/vscode.html', mode='r') as f_vs:
+            data = f_vs.read()
+            final_data = data.replace('$store_url', self.public_domain + "socket" + self.proxy_spec).replace('$socket_path', "/socket" + self.proxy_spec + "socket")
+            with open('/srv/jupyterhub/configs/vscode_{}.html'.format(self.user.escaped_name), mode='w')as f_cs:
+                f_cs.write(final_data)
+
+        with tarfile.open('/srv/jupyterhub/configs/vscode_{}.tar'.format(self.user.escaped_name), mode='w') as tar:
+            tar.add('/srv/jupyterhub/configs/vscode_{}.html'.format(self.user.escaped_name), arcname='vscode.html')
+        data = open('/srv/jupyterhub/configs/vscode_{}.tar'.format(self.user.escaped_name), 'rb').read()
+        container.put_archive('/usr/lib/code-server/src/browser/pages/', data)    
+
+        #remove temporary config files
+        os.remove('/srv/jupyterhub/configs/vscode_{}.tar'.format(self.user.escaped_name))
+        os.remove('/srv/jupyterhub/configs/vscode_{}.html'.format(self.user.escaped_name))
+
         # TODO: handle unpause
         self.log.info(
             "Starting %s %s (id: %s)",
@@ -1225,13 +1173,16 @@ class DockerSpawner(Spawner):
             self.container_id[:7],
         )
 
+        
         # start the container
         await self.start_object()
+
 
         if self.post_start_cmd:
             await self.post_start_exec()
 
         ip, port = await self.get_ip_and_port()
+
         if jupyterhub.version_info < (0, 7):
             # store on user for pre-jupyterhub-0.7:
             self.user.server.ip = ip
@@ -1376,36 +1327,3 @@ class DockerSpawner(Spawner):
         else:
             return obj
 
-
-def _deprecated_method(old_name, new_name, version):
-    """Create a deprecated method wrapper for a deprecated method name"""
-
-    def deprecated(self, *args, **kwargs):
-        warnings.warn(
-            (
-                "{cls}.{old_name} is deprecated in DockerSpawner {version}."
-                " Please use {cls}.{new_name} instead."
-            ).format(
-                cls=self.__class__.__name__,
-                old_name=old_name,
-                new_name=new_name,
-                version=version,
-            ),
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        old_method = getattr(self, new_name)
-        return old_method(*args, **kwargs)
-
-    return deprecated
-
-
-# deprecate white/blacklist method names
-for _old_name, _new_name, _version in [
-    ("check_image_whitelist", "check_allowed", "12.0")
-]:
-    setattr(
-        DockerSpawner,
-        _old_name,
-        _deprecated_method(_old_name, _new_name, _version),
-    )
