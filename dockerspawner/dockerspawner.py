@@ -350,6 +350,15 @@ class DockerSpawner(Spawner):
         """,
     )
 
+    async def get_images(self):
+        images = await self.docker('images')
+        im_list = []
+        for elem in images:
+            for (key, value) in elem.items():
+                if key == 'RepoTags' and (value != ['<none>:<none>']):
+                    im_list.append(value)
+        return im_list
+
     async def move_certs(self, paths):
         self.log.info("Staging internal ssl certs for %s", self._log_name)
         await self.pull_image(self.move_certs_image)
@@ -1058,6 +1067,8 @@ class DockerSpawner(Spawner):
         if image_option:
             # save choice in self.image
             self.image = await self.check_allowed(image_option)
+
+        self.log.debug("The image we want to use: %s, the images on the system: %s", self.image, await self.get_images())
 
         image = self.image
         await self.pull_image(image)
